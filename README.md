@@ -109,7 +109,7 @@ flowchart LR
 - CVAT stores rotation in degrees, clockwise around the box centre. Applying it before the warp straightens tilted plates.
 - Spaces in plate numbers are removed (`SB 262FF` → `SB262FF`). The same plate in a second photo is saved as `SB262FF__2.jpg`.
 
-There is no colour filtering or thresholding. An earlier version of this project masked out everything but dark pixels. On this dataset that erased characters on faded and dirty plates, so the network now gets plain grayscale images and learns to handle glare, dirt and shadows itself.
+There is no colour filtering or thresholding. An earlier version of this project masked out everything but dark pixels. On this dataset that erased characters on faded and dirty plates, so the network now gets grayscale images and learns to handle glare, dirt and shadows itself. The only normalization is a contrast stretch: the darkest pixel of each plate becomes 0 and the brightest 1, so dark and bright photos look alike.
 
 ## 2. Model
 
@@ -120,21 +120,23 @@ The model is a CRNN: convolutions turn the image into a sequence of feature vect
 ```mermaid
 flowchart TD
     I["Input image<br/>200 x 50 x 1<br/>(transposed: width first)"]
-    C1["Conv2D 32, 3x3, ReLU<br/>200 x 50 x 32"]
-    P1["MaxPooling 2x2<br/>100 x 25 x 32"]
-    C2["Conv2D 64, 3x3, ReLU<br/>100 x 25 x 64"]
-    P2["MaxPooling 2x2<br/>50 x 12 x 64"]
+    B1["Block 1: Conv 32 + BN + ReLU<br/>MaxPooling 2x2<br/>100 x 25 x 32"]
+    B2["Block 2: Conv 64 + BN + ReLU<br/>MaxPooling 2x2<br/>50 x 12 x 64"]
+    B3["Block 3: Conv 128 + BN + ReLU<br/>50 x 12 x 128"]
+    B4["Block 4: Conv 128 + BN + ReLU<br/>MaxPooling 1x2 (height only)<br/>50 x 6 x 128"]
     R["Reshape<br/>50 time steps x 768 features"]
-    D1["Dense 64, ReLU + Dropout 0.2<br/>50 x 64"]
+    D1["Dense 128, ReLU + Dropout 0.25<br/>50 x 128"]
     L1["Bidirectional LSTM 128<br/>50 x 256"]
     L2["Bidirectional LSTM 64<br/>50 x 128"]
     D2["Dense 37, softmax<br/>50 x 37"]
     O["Probability of each character<br/>+ blank at each of 50 steps"]
 
-    I --> C1 --> P1 --> C2 --> P2 --> R --> D1 --> L1 --> L2 --> D2 --> O
+    I --> B1 --> B2 --> B3 --> B4 --> R --> D1 --> L1 --> L2 --> D2 --> O
 ```
 
-The 37 output classes are the 35 characters in `CHARACTERS` (digits and letters except `Q`, which does not occur in the dataset), the `[UNK]` token of `StringLookup` and the CTC blank. The image is transposed before it enters the network, so after the convolutions each of the 50 time steps corresponds to a 4-pixel-wide vertical strip of the plate.
+The 37 output classes are the 35 characters in `CHARACTERS` (digits and letters except `Q`, which does not occur in the dataset), the `[UNK]` token of `StringLookup` and the CTC blank. All convolutions are 3x3. The image is transposed before it enters the network, so after the convolutions each of the 50 time steps corresponds to a 4-pixel-wide vertical strip of the plate. The last pooling shrinks only the height, which keeps 50 time steps for 7-8 characters.
+
+An earlier version used only two convolution layers (32 and 64 filters) without batch normalization. That was enough for black-and-white thresholded images, but on real grayscale photos the network never got past the CTC plateau (see [3. Training](#3-training)): it answered `SK` for every plate.
 
 ### Why CTC
 
@@ -183,20 +185,21 @@ flowchart LR
 flowchart TD
     A["plates_images/*.jpg"] --> B["Label from file name<br/>skip labels with unknown characters"]
     B --> C["Split by plate number (seed 42)<br/>80% / 20% of plate numbers"]
-    C --> D["tf.data: read JPEG → grayscale → [0,1]<br/>→ resize 200x50 → transpose<br/>label → indices"]
-    D --> AUG["Training set only: random shift,<br/>brightness, contrast, noise"]
+    C --> D["tf.data: read JPEG → grayscale → resize 200x50<br/>→ contrast stretch → transpose<br/>label → indices"]
+    D --> AUG["Training set only: repeat 4x per epoch,<br/>random shift, brightness, contrast, noise"]
     AUG --> PB["padded_batch(16)"]
     D --> PB
-    PB --> E["model.fit, Adam, up to 300 epochs"]
+    PB --> E["model.fit, Adam, up to 150 epochs<br/>(sample readings every 10 epochs)"]
     E --> F{"val_loss improved?"}
     F -->|yes| G["Save best_model.weights.h5"] --> E
     F -->|"no for 30 epochs"| H["Early stop,<br/>restore best weights"]
-    E -->|"300 epochs done"| H
+    E -->|"150 epochs done"| H
     H --> I["Save final_model.h5"] --> J["Validation: example predictions,<br/>plate accuracy, CER"]
 ```
 
 - **Split by plate number.** Some cars appear in more than one photo. All crops of one plate number go to the same subset, so the validation set only contains plates the model has never seen. A random split by image would leak them and make the results look better than they are.
-- **Augmentation.** About 230 training images are few for a neural network, which then memorizes the training set. Each epoch, every training image is shifted by a few pixels and gets random brightness, contrast and noise, so the network never sees exactly the same image twice.
+- **Augmentation.** About 230 training images are few for a neural network, which then memorizes the training set. Every time a training image is used, it is shifted by a few pixels and gets random brightness, contrast and noise, so the network never sees exactly the same image twice. One epoch goes through the training set 4 times (`TRAIN_REPEATS`); otherwise an epoch would be only 15 batches, and early stopping could end training before the model has had enough steps to learn.
+- **CTC plateau.** The loss first drops quickly, then stays around 15-20 for a while: the network only outputs the most common characters (here usually `S` or `SK`, the Silesian prefixes). When it starts to read the characters, the loss falls steeply. A callback prints a few validation readings every 10 epochs, so this moment is easy to see.
 - **Metrics.** *Plate accuracy* counts a plate as correct only when every character matches. *Character error rate (CER)* is the number of character edits (Levenshtein distance) between predictions and true plate numbers, divided by the number of true characters. It shows how close the wrong readings are.
 
 With `RUN_TRAINING = False`, `final_model.h5` is loaded with `load_weights` into the same architecture. Loading only the weights avoids rebuilding the custom `CTCLayer` from the file, which is not portable between Keras 2 and Keras 3. If the file was trained with a different `CHARACTERS` list, the notebook stops with an explanation.
