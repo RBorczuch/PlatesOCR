@@ -2,9 +2,12 @@
 
 Automatic reading of Polish license plates with OCR. A convolutional-recurrent neural network (CRNN) trained with the CTC loss reads the text of a plate crop.
 
-The whole pipeline, from downloading the dataset to reading plates, is in one notebook: [PlatesOCR.ipynb](PlatesOCR.ipynb).
+The project has two notebooks:
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RBorczuch/PlatesOCR/blob/main/PlatesOCR.ipynb)
+| Notebook | What it does | |
+|---|---|---|
+| [PlatesOCR.ipynb](PlatesOCR.ipynb) | downloads the datasets, cuts out the plates and trains the plate reader (OCR) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RBorczuch/PlatesOCR/blob/main/PlatesOCR.ipynb) |
+| [PlatesOCR_video.ipynb](PlatesOCR_video.ipynb) | trains a YOLO plate detector and runs detector + plate reader on photos and on a video | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RBorczuch/PlatesOCR/blob/main/PlatesOCR_video.ipynb) |
 
 ## Contents
 
@@ -20,6 +23,7 @@ The whole pipeline, from downloading the dataset to reading plates, is in one no
     - [Training model and prediction model](#training-model-and-prediction-model)
   - [3. Training](#3-training)
   - [4. Inference](#4-inference)
+  - [5. Video application: YOLO detector + plate reader](#5-video-application-yolo-detector--plate-reader)
   - [Files and folders](#files-and-folders)
   - [Limitations](#limitations)
   - [Previous version](#previous-version)
@@ -95,7 +99,7 @@ flowchart TD
     NEW["New plate crops"] --> INF --> TXT["Plate number, e.g. SK404XK"]
 ```
 
-The model reads plates that are already cut out and straightened. In the dataset the plates are located by the annotations; for new photos a plate detector is needed in front of the model.
+The plate reader reads plates that are already cut out and straightened. In the dataset the plates are located by the annotations; for photos and videos, the YOLO detector in `PlatesOCR_video.ipynb` finds them (see [section 5](#5-video-application-yolo-detector--plate-reader)).
 
 ## 1. Plate extraction
 
@@ -245,19 +249,97 @@ sequenceDiagram
     D->>U: ["SK404XK", ...]
 ```
 
+## 5. Video application: YOLO detector + plate reader
+
+`PlatesOCR_video.ipynb` turns the plate reader into a complete system that works on whole photos and videos. It needs the trained `final_model.h5` (downloaded from this repository if it is missing).
+
+```mermaid
+flowchart LR
+    F["Video frame<br/>or photo"] --> Y["YOLO11n detector<br/>plate boxes"]
+    Y --> TR["ByteTrack<br/>track id per plate"]
+    TR --> C["Enlarge box by 6% of height<br/>warp to 400 x 100"]
+    C --> R["Plate reader<br/>text + confidence"]
+    R --> V["Vote per track<br/>(confidence-weighted)"]
+    V --> O["Annotated video<br/>plates.csv, gallery"]
+```
+
+### Detector training
+
+The detector is trained on the boxes of the Katowice dataset:
+
+```mermaid
+flowchart TD
+    A["annotations.xml"] --> B["Box corners with rotation<br/>→ axis-aligned rectangle"]
+    B --> C["YOLO label: 0 cx cy w h<br/>(relative to image size)"]
+    P["Photos"] --> D["Downscale to max 1920 px"]
+    S["Same plate-number split<br/>as the plate reader (seed 42)"] --> E
+    C --> E["plates_yolo/<br/>images + labels, train / val"]
+    D --> E
+    E --> T["Fine-tune YOLO11n (COCO-pretrained)<br/>80 epochs, image size 960"]
+    T --> W[("plate_detector.pt")]
+```
+
+- **YOLO11n** is the smallest YOLO11 model (about 2.6 million parameters). Starting from COCO weights, a few hundred photos are enough to learn a single class.
+- **Image size 960** instead of the default 640, because plates are small in the full photos.
+- **Same split as the plate reader.** The plate numbers are split with the same function and seed as in `PlatesOCR.ipynb`, so the validation photos are new to both models.
+
+### Photo test
+
+All validation photos go through the complete system, and the results are compared with the annotations:
+
+| Measure | Meaning |
+|---|---|
+| mAP50, mAP50-95 | standard detection quality of YOLO on the validation photos |
+| detection recall | share of annotated plates found (overlap with the true box at least 50%) |
+| false detections | boxes that match no annotated plate |
+| end-to-end accuracy | share of annotated plates found *and* read without a mistake |
+| CER | character error rate of the readings of the found plates |
+
+This is the most honest measure of the whole system, because the crops come from the detector, not from the annotations.
+
+### Video
+
+```mermaid
+sequenceDiagram
+    participant V as Video
+    participant Y as YOLO + ByteTrack
+    participant R as Plate reader
+    participant T as PlateTrack (per id)
+    participant W as Output video
+    loop every FRAME_STEP-th frame
+        V->>Y: frame
+        Y->>R: plate crops with track ids
+        R->>T: text + confidence
+        Note over T: ignore readings < 4 characters<br/>or confidence < 0.5,<br/>add confidence to the vote
+        T->>W: box labelled with the winning text
+    end
+    T->>W: plates.csv + gallery of best crops
+```
+
+- **Tracking.** ByteTrack links the boxes of one car across frames, so its readings can be combined.
+- **Confidence.** For each reading, the probability of the least certain character. One unreadable character is enough to make it low.
+- **Vote.** One frame can be blurred or partly hidden. Each track sums the confidences of its readings per text; the text with the highest sum is the plate of that track, labelled in the video with its share of the vote.
+- **Output.** `video_output/<name>_annotated.mp4` (converted to H.264 with `ffmpeg` so that browsers can play it), `video_output/plates.csv` with one row per plate (reading, share of the vote, number of frames, time visible) and a gallery of the most confident crop of each plate.
+
+Best results come from 1080p video of Polish one-row plates, at least about 100 px wide in the frame, in daylight and with little motion blur.
+
 ## Files and folders
 
 
 | Path                    | Contents                                                                          |
 | ----------------------- | --------------------------------------------------------------------------------- |
-| `PlatesOCR.ipynb`       | the whole pipeline                                                                |
+| `PlatesOCR.ipynb`       | datasets, plate extraction and training of the plate reader                       |
+| `PlatesOCR_video.ipynb` | YOLO plate detector, photo test and video application                             |
 | `requirements.txt`      | Python dependencies for running locally                                           |
 | `dataset/`              | unpacked Kaggle dataset:`annotations.xml` and `photos/` (created by the notebook) |
 | `plates_images/`        | straightened plate crops, file name = plate number (created by the notebook)      |
 | `dataset_eu/`           | unpacked European dataset (created by the notebook)                               |
 | `plates_extra/`         | European plate crops, file name = plate number (created by the notebook)          |
 | `best_model.weights.h5` | best weights saved during training                                                |
-| `final_model.h5`        | trained model; the committed one is outdated, see[Quick start](#quick-start)      |
+| `final_model.h5`        | trained plate reader (38 classes)                                                 |
+| `plates_yolo/`          | detector training data in YOLO format (created by the video notebook)             |
+| `plate_detector.pt`     | trained YOLO plate detector (created by the video notebook)                       |
+| `video_output/`         | annotated video, `plates.csv` (created by the video notebook)                     |
 
 ## Limitations
 
