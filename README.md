@@ -11,7 +11,7 @@ The whole pipeline, from downloading the dataset to reading plates, is in one no
 - [PlatesOCR](#platesocr)
   - [Contents](#contents)
   - [Quick start](#quick-start)
-  - [Dataset](#dataset)
+  - [Datasets](#datasets)
   - [Pipeline overview](#pipeline-overview)
   - [1. Plate extraction](#1-plate-extraction)
   - [2. Model](#2-model)
@@ -40,10 +40,13 @@ Two switches in the first code cell choose what runs:
 
 | Switch           | `True`                                                     | `False`                             |
 | ---------------- | ---------------------------------------------------------- | ----------------------------------- |
-| `RUN_EXTRACTION` | download the dataset (about 600 MB) and cut out the plates | use the existing`plates_images/`    |
-| `RUN_TRAINING`   | train a new model, save it to`final_model.h5`              | load the model from`final_model.h5` |
+| `RUN_EXTRACTION` | download the datasets (about 630 MB) and cut out the plates | use the existing `plates_images/` and `plates_extra/` |
+| `USE_EXTRA_DATA` | add the European plates to the training set                 | train on the Polish plates only                       |
+| `RUN_TRAINING`   | train a new model, save it to `final_model.h5`              | load the model from `final_model.h5`                  |
 
-## Dataset
+## Datasets
+
+### Polish plates (training and validation)
 
 [Poland vehicle license plate dataset](https://www.kaggle.com/datasets/piotrstefaskiue/poland-vehicle-license-plate-dataset) on Kaggle, collected in Katowice by the University of Economics in Katowice (last updated January 2026).
 
@@ -56,20 +59,37 @@ Two switches in the first code cell choose what runs:
 | Conditions  | sun, clouds, winter, dirty and snowy plates, glare, different angles and distances                                 |
 | Download    | public, no Kaggle account needed                                                                                   |
 
+### European plates (extra training data)
+
+[European License Plates Dataset](https://www.kaggle.com/datasets/abdelhamidzakaria/european-license-plates-dataset) on Kaggle (MIT license).
+
+|           |                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------- |
+| Images    | 735 plate crops (PNG and JPG) from France, Germany, Croatia, Poland and other countries           |
+| Labels    | file name = plate number, `_1`, `_2`, ... for repeated plates                                     |
+| Used      | 685 crops; 50 loose crops narrower than 2:1 (a lot of background) are skipped                     |
+| Download  | public, no Kaggle account needed                                                                  |
+
+With only 231 Polish training images, the network learned the common region prefixes (`KR`, `SB`, `KOL`) but lost the random characters in the middle of the plate. The European crops are added to the training set only, so the network sees more shapes of every character while the validation set stays Polish.
+
 ## Pipeline overview
 
 ```mermaid
 flowchart TD
-    K[("Kaggle dataset<br/>290 photos + annotations.xml")]
+    K[("Polish dataset<br/>290 photos + annotations.xml")]
     EX["1. Plate extraction<br/>rotated box → 4 corners → perspective warp"]
     P[("plates_images/<br/>SK404XK.jpg, STA0461C.jpg, ...")]
     S["Split by plate number<br/>80% training / 20% validation"]
+    EU[("European dataset<br/>735 plate crops")]
+    IMP["Import crops<br/>skip loose crops, drop alpha"]
+    X[("plates_extra/<br/>BZ310SW.jpg, ...")]
     TR["3. Training<br/>CRNN + CTC loss, augmentation"]
     M[("final_model.h5")]
     EV["Evaluation<br/>plate accuracy, character error rate"]
     INF["4. Inference<br/>read_plates()"]
 
     K --> EX --> P --> S --> TR --> M
+    EU --> IMP --> X -->|"training only"| TR
     M --> EV
     M --> INF
     NEW["New plate crops"] --> INF --> TXT["Plate number, e.g. SK404XK"]
@@ -128,13 +148,13 @@ flowchart TD
     D1["Dense 128, ReLU + Dropout 0.25<br/>50 x 128"]
     L1["Bidirectional LSTM 128<br/>50 x 256"]
     L2["Bidirectional LSTM 64<br/>50 x 128"]
-    D2["Dense 37, softmax<br/>50 x 37"]
+    D2["Dense 38, softmax<br/>50 x 38"]
     O["Probability of each character<br/>+ blank at each of 50 steps"]
 
     I --> B1 --> B2 --> B3 --> B4 --> R --> D1 --> L1 --> L2 --> D2 --> O
 ```
 
-The 37 output classes are the 35 characters in `CHARACTERS` (digits and letters except `Q`, which does not occur in the dataset), the `[UNK]` token of `StringLookup` and the CTC blank. All convolutions are 3x3. The image is transposed before it enters the network, so after the convolutions each of the 50 time steps corresponds to a 4-pixel-wide vertical strip of the plate. The last pooling shrinks only the height, which keeps 50 time steps for 7-8 characters.
+The 38 output classes are the 36 characters in `CHARACTERS` (digits and letters `A`-`Z`), the `[UNK]` token of `StringLookup` and the CTC blank. All convolutions are 3x3. The image is transposed before it enters the network, so after the convolutions each of the 50 time steps corresponds to a 4-pixel-wide vertical strip of the plate. The last pooling shrinks only the height, which keeps 50 time steps for 7-8 characters.
 
 An earlier version used only two convolution layers (32 and 64 filters) without batch normalization. That was enough for black-and-white thresholded images, but on real grayscale photos the network never got past the CTC plateau (see [3. Training](#3-training)): it answered `SK` for every plate.
 
@@ -146,7 +166,7 @@ Reading a plate (greedy decoding) reverses that reduction:
 
 ```mermaid
 flowchart LR
-    A["Softmax output<br/>50 steps x 37 classes"] --> B["Most likely class<br/>at every step"]
+    A["Softmax output<br/>50 steps x 38 classes"] --> B["Most likely class<br/>at every step"]
     B --> C["Merge repeated classes"] --> D["Remove blanks"] --> E["Map indices<br/>to characters"]
 ```
 
@@ -186,10 +206,11 @@ flowchart TD
     A["plates_images/*.jpg"] --> B["Label from file name<br/>skip labels with unknown characters"]
     B --> C["Split by plate number (seed 42)<br/>80% / 20% of plate numbers"]
     C --> D["tf.data: read JPEG → grayscale → resize 200x50<br/>→ contrast stretch → transpose<br/>label → indices"]
-    D --> AUG["Training set only: repeat 4x per epoch,<br/>random shift, brightness, contrast, noise"]
+    C -->|"training set"| ADD["+ plates_extra/*.jpg<br/>(European plates)"] --> D
+    D --> AUG["Training set only: shift, rotation, zoom,<br/>blur, brightness, contrast, noise"]
     AUG --> PB["padded_batch(16)"]
     D --> PB
-    PB --> E["model.fit, Adam, up to 150 epochs<br/>(sample readings every 10 epochs)"]
+    PB --> E["model.fit, AdamW, up to 150 epochs<br/>(sample readings every 10 epochs)"]
     E --> F{"val_loss improved?"}
     F -->|yes| G["Save best_model.weights.h5"] --> E
     F -->|"no for 30 epochs"| H["Early stop,<br/>restore best weights"]
@@ -198,7 +219,9 @@ flowchart TD
 ```
 
 - **Split by plate number.** Some cars appear in more than one photo. All crops of one plate number go to the same subset, so the validation set only contains plates the model has never seen. A random split by image would leak them and make the results look better than they are.
-- **Augmentation.** About 230 training images are few for a neural network, which then memorizes the training set. Every time a training image is used, it is shifted by a few pixels and gets random brightness, contrast and noise, so the network never sees exactly the same image twice. One epoch goes through the training set 4 times (`TRAIN_REPEATS`); otherwise an epoch would be only 15 batches, and early stopping could end training before the model has had enough steps to learn.
+- **Augmentation.** A small training set is easy to memorize: on the Polish plates alone the training loss fell below 1 while the validation loss went back up to 13. Every time a training image is used, it is shifted by a few pixels, rotated by up to about 3 degrees, zoomed out by up to 15%, blurred, and gets random brightness, contrast and noise, so the network never sees exactly the same image twice. Zoom only goes out, so characters at the edges are never cut off.
+- **Epoch size.** A training set smaller than `IMAGES_PER_EPOCH` (1000) is repeated within an epoch, each time with new augmentation. With the Polish plates alone (231 images) an epoch would otherwise be only 15 batches, and early stopping could end training before the model has had enough steps to learn.
+- **Weight decay.** The AdamW optimizer (`WEIGHT_DECAY = 0.01`) slowly shrinks all weights towards zero, which also works against memorizing.
 - **CTC plateau.** The loss first drops quickly, then stays around 15-20 for a while: the network only outputs the most common characters (here usually `S` or `SK`, the Silesian prefixes). When it starts to read the characters, the loss falls steeply. A callback prints a few validation readings every 10 epochs, so this moment is easy to see.
 - **Metrics.** *Plate accuracy* counts a plate as correct only when every character matches. *Character error rate (CER)* is the number of character edits (Levenshtein distance) between predictions and true plate numbers, divided by the number of true characters. It shows how close the wrong readings are.
 
@@ -218,7 +241,7 @@ sequenceDiagram
     U->>G: BGR crops
     G->>T: grayscale crops
     T->>M: batch of 200 x 50 x 1 tensors
-    M->>D: 50 x 37 probabilities per plate
+    M->>D: 50 x 38 probabilities per plate
     D->>U: ["SK404XK", ...]
 ```
 
@@ -231,12 +254,14 @@ sequenceDiagram
 | `requirements.txt`      | Python dependencies for running locally                                           |
 | `dataset/`              | unpacked Kaggle dataset:`annotations.xml` and `photos/` (created by the notebook) |
 | `plates_images/`        | straightened plate crops, file name = plate number (created by the notebook)      |
+| `dataset_eu/`           | unpacked European dataset (created by the notebook)                               |
+| `plates_extra/`         | European plate crops, file name = plate number (created by the notebook)          |
 | `best_model.weights.h5` | best weights saved during training                                                |
 | `final_model.h5`        | trained model; the committed one is outdated, see[Quick start](#quick-start)      |
 
 ## Limitations
 
-- **Small dataset.** 290 photos, 267 different plates. Expect mistakes on unusual plates (custom plates, old black plates, temporary plates). More data helps most. Other Polish datasets, such as Roboflow Universe collections, can be added if they are converted to the `plates_images/` naming scheme.
+- **Small dataset.** 290 Polish photos (267 different plates) plus 685 European crops. Expect mistakes on unusual plates (custom plates, old black plates, temporary plates). More data helps most: any folder of crops named `<plate number>.jpg` can be added to the training set the same way as `plates_extra/`. Synthetic plates (random plate numbers rendered in the plate font) are the next step if real data runs out.
 - **One-row plates only.** Two-row plates (motorcycles, some trailers) do not fit the left-to-right reading of the model.
 - **Fixed character set.** A trained model only fits the `CHARACTERS` list it was trained with.
 
@@ -244,4 +269,4 @@ sequenceDiagram
 
 The first version of this project was trained on different data: a license plate dataset from Roboflow Universe, exported in COCO format with a segmentation polygon around every plate. The plates were cut out of the photos, labelled automatically with EasyOCR and corrected by hand, which gave a training set of 250 plates. 
 
-The Roboflow export link used by the notebooks has since expired (the download returns HTTP 403), so the dataset could no longer be downloaded. In this update it was replaced with the [Poland vehicle license plate dataset](#dataset) from Kaggle. Because that dataset already contains the plate numbers, the EasyOCR labelling and manual review steps were removed as well. The original three notebooks (`license_plates_extraction.ipynb`, `PlatesOCR_learning.ipynb`, `PlatesOCR_model_test.ipynb`) are still available in the git history.
+The Roboflow export link used by the notebooks has since expired (the download returns HTTP 403), so the dataset could no longer be downloaded. In this update it was replaced with the [Poland vehicle license plate dataset](#polish-plates-training-and-validation) from Kaggle. Because that dataset already contains the plate numbers, the EasyOCR labelling and manual review steps were removed as well. The original three notebooks (`license_plates_extraction.ipynb`, `PlatesOCR_learning.ipynb`, `PlatesOCR_model_test.ipynb`) are still available in the git history.
