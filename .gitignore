@@ -16,3 +16,5 @@ video_output/
 yolo11n.pt
 input.mp4
 *_annotated*.mp4
+final_model.h5
+plate_detector.pt

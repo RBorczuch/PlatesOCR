@@ -44,6 +44,7 @@ The project has two notebooks:
     - [Troubleshooting](#troubleshooting)
     - [Results](#results)
   - [Files and folders](#files-and-folders)
+  - [Trained models](#trained-models)
   - [Limitations](#limitations)
   - [Previous version](#previous-version)
 
@@ -51,8 +52,8 @@ The project has two notebooks:
 
 **Google Colab.** Open a notebook with its badge above, choose a GPU runtime (Runtime → Change runtime type → T4 GPU) and run all cells. TensorFlow and PyTorch are already installed there; the video notebook installs Ultralytics (YOLO) itself.
 
-1. `PlatesOCR.ipynb` trains the plate reader and saves `final_model.h5`. This step is optional: a trained `final_model.h5` is included in the repository.
-2. `PlatesOCR_video.ipynb` trains the detector, tests the whole system on the validation photos and processes a video. A trained `plate_detector.pt` is included in the repository as well: set `TRAIN_DETECTOR = False` to use both models as they are, without any training.
+1. `PlatesOCR.ipynb` trains the plate reader and saves `final_model.h5`. This step is optional: a trained `final_model.h5` is available in the [v1.0 release](https://github.com/RBorczuch/PlatesOCR/releases/tag/v1.0) and is downloaded automatically when needed.
+2. `PlatesOCR_video.ipynb` trains the detector, tests the whole system on the validation photos and processes a video. A trained `plate_detector.pt` is in the release as well: set `TRAIN_DETECTOR = False` to use both models as they are, without any training.
 
 **Locally.**
 
@@ -68,7 +69,7 @@ Switches in the first code cell of `PlatesOCR.ipynb` choose what runs:
 | ---------------- | ----------------------------------------------------------- | ---------------------------------------------------- |
 | `RUN_EXTRACTION` | download the datasets (about 630 MB) and cut out the plates | use the existing`plates_images/` and `plates_extra/` |
 | `USE_EXTRA_DATA` | add the European plates to the training set                 | train on the Polish plates only                      |
-| `RUN_TRAINING`   | train a new model, save it to`final_model.h5`               | load the model from`final_model.h5`                  |
+| `RUN_TRAINING`   | train a new model, save it to`final_model.h5`               | load `final_model.h5` (downloaded from the latest release if missing) |
 
 The settings of `PlatesOCR_video.ipynb` are described in [section 5](#settings).
 
@@ -286,7 +287,7 @@ sequenceDiagram
 
 ## 5. Video application: YOLO detector + plate reader
 
-`PlatesOCR_video.ipynb` turns the plate reader into a complete system that works on whole photos and videos. It needs the trained `final_model.h5` (downloaded from this repository if it is missing).
+`PlatesOCR_video.ipynb` turns the plate reader into a complete system that works on whole photos and videos. It needs the trained `final_model.h5` (downloaded from the latest GitHub release if it is missing).
 
 YOLO (PyTorch) runs on the GPU and the plate reader (TensorFlow) on the CPU, which is fast enough for a few plate crops per frame. PyTorch and TensorFlow ship different builds of the CUDA libraries (in Colab: CUDA 13 and CUDA 12), and when both initialize the GPU in one process the kernel crashes without an error message. The notebook therefore loads PyTorch's CUDA libraries first, hides the GPU from TensorFlow and trains the detector in a separate process.
 
@@ -398,7 +399,7 @@ The first code cell of `PlatesOCR_video.ipynb`:
 
 | Setting                  | Default                | Meaning                                                                                                                                                               |
 | ------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TRAIN_DETECTOR`         | `True`                 | train the detector;`False` loads the trained `plate_detector.pt` included in the repository (downloaded automatically in Colab) and skips about 8 minutes of training |
+| `TRAIN_DETECTOR`         | `True`                 | train the detector;`False` loads the trained `plate_detector.pt` (downloaded from the latest GitHub release if missing) and skips about 8 minutes of training |
 | `VIDEO_PATH`             | `input.mp4`            | the video to process; in Colab you are asked to upload one if it does not exist                                                                                       |
 | `VIDEO_URL`              | test video (see below) | direct link to a video file or a zip archive with one, downloaded to`VIDEO_PATH`; set to `""` to use your own file                                                    |
 | `FRAME_STEP`             | 1                      | process every n-th frame; 2-3 make long 30 fps videos faster with little loss                                                                                         |
@@ -463,11 +464,22 @@ Checked by eye against the crops, about 18 of the 31 readings are fully correct.
 | `dataset_eu/`           | unpacked European dataset (created by the notebook)                                                                   |
 | `plates_extra/`         | European plate crops, file name = plate number (created by the notebook)                                              |
 | `best_model.weights.h5` | best weights saved during training                                                                                    |
-| `final_model.h5`        | trained plate reader (38 classes)                                                                                     |
+| `final_model.h5`        | trained plate reader (38 classes); in the [v1.0 release](https://github.com/RBorczuch/PlatesOCR/releases/tag/v1.0), not in the repository |
 | `plates_yolo/`          | detector training data in YOLO format (created by the video notebook)                                                 |
-| `plate_detector.pt`     | trained YOLO plate detector (included; the video notebook can also train it)                                          |
+| `plate_detector.pt`     | trained YOLO plate detector; in the [v1.0 release](https://github.com/RBorczuch/PlatesOCR/releases/tag/v1.0), not in the repository (the video notebook can also train it) |
 | `yolo11n.pt`            | COCO-pretrained YOLO11n, the starting point for detector training (Ultralytics downloads it automatically if missing) |
 | `video_output/`         | annotated video,`plates.csv` (created by the video notebook)                                                          |
+
+## Trained models
+
+The trained models are attached to the [v1.0 release](https://github.com/RBorczuch/PlatesOCR/releases/tag/v1.0), not committed to the repository, so new versions do not make the git history grow. The notebooks download them automatically from the latest release (`https://github.com/RBorczuch/PlatesOCR/releases/latest/download/<file>`) when they are not in the working folder.
+
+| File | Model | Validation result | License |
+|---|---|---|---|
+| `final_model.h5` | plate reader, CRNN + CTC, 38 classes | 56/59 plates read without a mistake (94.9%), CER 0.9% | MIT (this project) |
+| `plate_detector.pt` | YOLO11n plate detector | mAP50 0.995, mAP50-95 0.754 | AGPL-3.0 (trained with Ultralytics YOLO) |
+
+To publish a new version, train the models with the notebooks, create a new release with a new tag (for example `v1.1`) and attach the files; the notebooks pick up the latest release without any change.
 
 ## Limitations
 
