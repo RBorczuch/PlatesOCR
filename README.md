@@ -253,6 +253,8 @@ sequenceDiagram
 
 `PlatesOCR_video.ipynb` turns the plate reader into a complete system that works on whole photos and videos. It needs the trained `final_model.h5` (downloaded from this repository if it is missing).
 
+YOLO (PyTorch) runs on the GPU and the plate reader (TensorFlow) on the CPU, which is fast enough for a few plate crops per frame. PyTorch and TensorFlow ship different builds of the CUDA libraries (in Colab: CUDA 13 and CUDA 12), and when both initialize the GPU in one process the kernel crashes without an error message. The notebook therefore loads PyTorch's CUDA libraries first, hides the GPU from TensorFlow and trains the detector in a separate process.
+
 ```mermaid
 flowchart LR
     F["Video frame<br/>or photo"] --> Y["YOLO11n detector<br/>plate boxes"]
